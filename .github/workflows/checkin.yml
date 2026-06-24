@@ -35,8 +35,8 @@ jobs:
       - name: 3. 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install seleniumbase
-          sbase install chromedriver
+          pip install -U seleniumbase
+          sbase install chromedriver --reinstall
           sudo apt-get update
           sudo apt-get install -y xvfb x11vnc xdotool fluxbox novnc websockify
 
@@ -148,8 +148,8 @@ jobs:
       - name: 3. 安装自动化底层框架
         run: |
           python -m pip install --upgrade pip
-          pip install seleniumbase
-          sbase install chromedriver
+          pip install -U seleniumbase
+          sbase install chromedriver --reinstall
 
       - name: 4. 安装虚拟显示外壳
         run: sudo apt-get update && sudo apt-get install -y xvfb xdotool
