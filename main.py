@@ -16,7 +16,7 @@ from seleniumbase import SB
 USER_ENV_FILE = str(Path.home() / ".config" / "browser-automation-panel" / "scripts.env")
 TASK_RESULT_PATH = (os.environ.get("TASK_RESULT_PATH") or "").strip()
 TASK_SCREENSHOT_PATH = (os.environ.get("TASK_SCREENSHOT_PATH") or "").strip()
-SCRIPT_REVISION = "2026-05-26-dom-login-no-api-poll"
+SCRIPT_REVISION = "2026-06-24-github-actions"
 
 SITE_URL = "https://agentrouter.org"
 LOGIN_URL = "https://agentrouter.org/login"
@@ -124,21 +124,13 @@ def send_tg_message_via_curl(text: str) -> bool:
     if not proxy:
         return False
     cmd = [
-        "curl",
-        "-sS",
-        "--max-time",
-        "25",
-        "--socks5-hostname",
-        proxy,
-        "-X",
-        "POST",
+        "curl", "-sS", "--max-time", "25",
+        "--socks5-hostname", proxy,
+        "-X", "POST",
         f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-        "--data-urlencode",
-        f"chat_id={TG_CHAT_ID}",
-        "--data-urlencode",
-        f"text={text}",
-        "--data-urlencode",
-        "disable_web_page_preview=true",
+        "--data-urlencode", f"chat_id={TG_CHAT_ID}",
+        "--data-urlencode", f"text={text}",
+        "--data-urlencode", "disable_web_page_preview=true",
     ]
     try:
         proc = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
@@ -186,22 +178,18 @@ def build_tg_card(ok: bool, data: dict | None = None, error: str = "") -> str:
     data = data or {}
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     status = "✅ 成功" if ok else "❌ 失败"
-    balance_before = data.get("balanceBeforeText") or "未读取"
-    balance_after = data.get("balanceAfterText") or "未读取"
-    balance_delta = data.get("balanceDeltaText") or "未读取"
     lines = [
         "🤖 AgentRouter 签到通知",
         "",
         f"🕒 运行时间: {now_str}",
         f"📊 结果: {status}",
-        f"💰 签到前余额: {balance_before}",
-        f"💵 签到后余额: {balance_after}",
-        f"📈 余额变动: {balance_delta}",
+        f"💰 签到前余额: {data.get('balanceBeforeText') or '未读取'}",
+        f"💵 签到后余额: {data.get('balanceAfterText') or '未读取'}",
+        f"📈 余额变动: {data.get('balanceDeltaText') or '未读取'}",
         f"🧪 判定依据: {data.get('reason') or ('OK' if ok else 'FAILED')}",
     ]
-    final_url = data.get("url") or ""
-    if final_url:
-        lines.append(f"🔗 最终页面: {final_url}")
+    if data.get("url"):
+        lines.append(f"🔗 最终页面: {data['url']}")
     if error:
         lines.append(f"⚠️ 异常: {error[:240]}")
     return "\n".join(lines)
@@ -261,7 +249,7 @@ def build_sb_args() -> dict:
         args["proxy"] = normalize_sb_proxy(proxy)
 
     chromium_args = [
-        "--no-sandbox",              
+        "--no-sandbox",
         "--disable-dev-shm-usage",
         "--hide-crash-restore-bubble",
         "--disable-session-crashed-bubble",
@@ -316,6 +304,27 @@ def normalize_profile_crash_state(user_data_dir: str) -> None:
     ]
     patched = sum(1 for file_path, updates in files if patch_json_file(file_path, updates))
     log(f"profile crash-state patched files: {patched}")
+
+
+def cleanup_profile_locks(user_data_dir: str) -> None:
+    if not user_data_dir:
+        return
+    base = Path(user_data_dir)
+    lock_files = [
+        base / "SingletonLock",
+        base / "SingletonCookie",
+        base / "SingletonSocket",
+        base / "Default" / "SingletonLock",
+    ]
+    removed = 0
+    for lock in lock_files:
+        try:
+            if lock.exists() or lock.is_symlink():
+                lock.unlink()
+                removed += 1
+        except Exception as exc:
+            log(f"lock cleanup failed: {lock}: {exc}")
+    log(f"profile lock files removed: {removed}")
 
 
 def dismiss_chrome_crash_prompt() -> None:
@@ -484,7 +493,7 @@ def page_text_sample(sb: SB, limit: int = 5000) -> str:
 
 
 def parse_money_text(text: str) -> float | None:
-    match = re.search(r"\$\s*([0-9]+(?:\.[0-9]+)?)", str(text or ""))
+    match = re.search(r"\$\s*(+(?:\.+)?)", str(text or ""))
     if not match:
         return None
     try:
@@ -501,7 +510,7 @@ def read_balance_from_page(sb: SB) -> dict:
             const text = norm(document.body && (document.body.innerText || document.body.textContent || ''));
             const labelIndex = text.indexOf('当前余额');
             const sample = labelIndex >= 0 ? text.slice(labelIndex, labelIndex + 120) : text.slice(0, 500);
-            const match = sample.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/) || text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
+            const match = sample.match(/\$\s*(+(?:\.+)?)/) || text.match(/\$\s*(+(?:\.+)?)/);
             return { balanceText: match ? match[0] : '', balanceAmount: match ? match[1] : '', sample };
             """
         )
@@ -636,6 +645,7 @@ def main() -> None:
         log(f"BROWSER_USER_DATA_DIR: {profile_dir}")
         log(f"BROWSER_CHROME_PATH: {(os.environ.get('BROWSER_CHROME_PATH') or '').strip()}")
         normalize_profile_crash_state(profile_dir)
+        cleanup_profile_locks(profile_dir)
 
         with SB(**build_sb_args()) as sb:
             log("browser started")
