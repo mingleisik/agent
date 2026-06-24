@@ -1,14 +1,15 @@
 name: 自动签到任务
 
 on:
+  repository_dispatch:
+    types: [agent]
   workflow_dispatch:
     inputs:
       setup_profile:
         description: '首次初始化 Profile？（输入 true 进入 noVNC 手动登录模式）'
         required: false
         default: 'false'
-  schedule:
-    - cron: '30 0 * * *' # 每天 UTC 0:30 (北京时间 8:30)
+
 
 # ✅ 防止并发导致 cache key 冲突
 concurrency:
