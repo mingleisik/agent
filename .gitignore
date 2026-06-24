@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+scripts.env
+
+# Screenshots and results
+*.png
+*.jpg
+result.json
+task_result.json
+
+# Proxy configs and logs
+config.json
+singbox.log
