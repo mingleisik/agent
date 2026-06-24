@@ -261,6 +261,8 @@ def build_sb_args() -> dict:
         args["proxy"] = normalize_sb_proxy(proxy)
 
     chromium_args = [
+        "--no-sandbox",              
+        "--disable-dev-shm-usage",
         "--hide-crash-restore-bubble",
         "--disable-session-crashed-bubble",
         "--no-first-run",
