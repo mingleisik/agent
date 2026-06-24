@@ -493,7 +493,7 @@ def page_text_sample(sb: SB, limit: int = 5000) -> str:
 
 
 def parse_money_text(text: str) -> float | None:
-    match = re.search(r"\$\s*(+(?:\.+)?)", str(text or ""))
+    match = re.search(r"\$\s*([0-9]+(?:\.[0-9]+)?)", str(text or ""))
     if not match:
         return None
     try:
@@ -510,7 +510,7 @@ def read_balance_from_page(sb: SB) -> dict:
             const text = norm(document.body && (document.body.innerText || document.body.textContent || ''));
             const labelIndex = text.indexOf('当前余额');
             const sample = labelIndex >= 0 ? text.slice(labelIndex, labelIndex + 120) : text.slice(0, 500);
-            const match = sample.match(/\$\s*(+(?:\.+)?)/) || text.match(/\$\s*(+(?:\.+)?)/);
+            const match = sample.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/) || text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
             return { balanceText: match ? match[0] : '', balanceAmount: match ? match[1] : '', sample };
             """
         )
