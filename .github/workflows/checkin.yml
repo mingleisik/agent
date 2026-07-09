@@ -4,137 +4,16 @@ on:
   repository_dispatch:
     types: [agent]
   workflow_dispatch:
-    inputs:
-      setup_profile:
-        description: '首次初始化 Profile？（输入 true 进入 noVNC 手动登录模式）'
-        required: false
-        default: 'false'
 
-# ✅ 防止并发导致 cache key 冲突
 concurrency:
   group: agentrouter-checkin
   cancel-in-progress: true
 
 jobs:
-  # ─────────────────────────────────────────────────────────────
-  # JOB 1：首次初始化 Profile（手动触发，输入 setup_profile=true）
-  # ─────────────────────────────────────────────────────────────
-  setup-profile:
-    name: 🔧 首次初始化 Chrome Profile（noVNC + cloudflared）
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.setup_profile == 'true'
-    steps:
-      - name: 1. 检出代码
-        uses: actions/checkout@v4
-
-      - name: 2. 安装 Python 环境
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: 3. 安装依赖
-        run: |
-          python -m pip install --upgrade pip
-          pip install -U seleniumbase
-          sudo apt-get update
-          sudo apt-get install -y xvfb x11vnc xdotool fluxbox novnc websockify
-
-      - name: 4. 按需拉起 Sing-Box 代理
-        if: env.PROXY_STR != ''
-        env:
-          PROXY_STR: ${{ secrets.PROXY_STR }}
-        run: |
-          echo "检测到代理配置，正在拉起 Sing-Box..."
-          curl -LO https://github.com/SagerNet/sing-box/releases/download/v1.9.3/sing-box-1.9.3-linux-amd64.tar.gz
-          tar -xzf sing-box-1.9.3-linux-amd64.tar.gz
-          sudo cp sing-box-1.9.3-linux-amd64/sing-box /usr/local/bin/
-          python convert_proxy.py
-          nohup sing-box run -c config.json > singbox.log 2>&1 &
-          sleep 3
-          curl -sS --socks5 127.0.0.1:8080 -o /dev/null -w "代理隧道建立成功！\n" https://api.ipify.org || echo "代理可能未就绪"
-
-      - name: 5. 启动虚拟屏幕 + noVNC + cloudflared 隧道 + Chrome，等待手动登录
-        env:
-          PROXY_STR: ${{ secrets.PROXY_STR }}
-        run: |
-          mkdir -p ~/.chrome-profile-agentrouter
-
-          # 下载 cloudflared（临时隧道，无需账号）
-          curl -sSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-            -o /usr/local/bin/cloudflared
-          chmod +x /usr/local/bin/cloudflared
-
-          # 启动虚拟屏幕
-          Xvfb :99 -screen 0 1280x800x24 &
-          export DISPLAY=:99
-          sleep 1
-
-          # 启动轻量窗口管理器
-          fluxbox &
-          sleep 1
-
-          # 启动无密码 VNC（本地 5900）
-          x11vnc -display :99 -forever -nopw -bg -quiet
-          sleep 1
-
-          # 启动 noVNC（把 VNC 转成网页，监听 6080）
-          websockify --web /usr/share/novnc 6080 localhost:5900 &
-          sleep 2
-
-          # 启动 cloudflared 临时隧道，穿透 6080
-          nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cf.log 2>&1 &
-          sleep 8
-
-          # 从日志里提取 trycloudflare.com 地址
-          CF_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -1)
-          echo ""
-          echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║  🌐 浏览器直接打开下面的链接即可远程操控 Chrome！          ║"
-          echo "║                                                              ║"
-          echo "║  👉 ${CF_URL}/vnc.html?autoconnect=true&reconnect=true"
-          echo "║                                                              ║"
-          echo "║  提示：登录 GitHub / AgentRouter 后不要手动结束 Job          ║"
-          echo "║  等待倒计时结束，系统会保存 Profile 到缓存                   ║"
-          echo "╚══════════════════════════════════════════════════════════════╝"
-
-          # 构造 Chrome 启动参数
-          CHROME_ARGS="--user-data-dir=$HOME/.chrome-profile-agentrouter \
-            --no-first-run \
-            --no-default-browser-check \
-            --disable-session-crashed-bubble \
-            --disable-dev-shm-usage \
-            --no-sandbox \
-            --window-size=1280,800"
-
-          if [ -n "$PROXY_STR" ]; then
-            CHROME_ARGS="$CHROME_ARGS --proxy-server=http://127.0.0.1:8080"
-          fi
-
-          # 单实例打开多 Tab，避免 user-data-dir 锁文件冲突
-          google-chrome $CHROME_ARGS \
-            --new-window https://github.com \
-            https://agentrouter.org/login &
-
-          echo ""
-          echo "⏳ 等待 6 分钟供手动操作..."
-          sleep 360
-
-      - name: 6. 保存 Chrome Profile 到 Actions Cache
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.chrome-profile-agentrouter
-          key: chrome-profile-agentrouter-v1-${{ github.run_id }}
-
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 2：每日自动签到
-  # ─────────────────────────────────────────────────────────────
   run-daily-checkin:
     name: ✅ 每日自动签到
     runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'repository_dispatch' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.setup_profile != 'true')
+    timeout-minutes: 10
     steps:
       - name: 1. 检出代码
         uses: actions/checkout@v4
@@ -159,9 +38,17 @@ jobs:
           key: chrome-profile-agentrouter-v1-${{ github.run_id }}
           restore-keys: |
             chrome-profile-agentrouter-v1-
-          fail-on-cache-miss: false
+          fail-on-cache-miss: true
 
-      - name: 6. 按需下载并配置 Sing-Box 代理
+      - name: 6. 验证 Profile 完整性
+        run: |
+          if [ ! -d "$HOME/.chrome-profile-agentrouter/Default" ]; then
+            echo "❌ Profile 目录不存在或不完整，需要重新初始化"
+            exit 1
+          fi
+          echo "✅ Profile 目录结构完整"
+
+      - name: 7. 按需下载并配置 Sing-Box 代理
         if: env.PROXY_STR != ''
         env:
           PROXY_STR: ${{ secrets.PROXY_STR }}
@@ -170,12 +57,16 @@ jobs:
           curl -LO https://github.com/SagerNet/sing-box/releases/download/v1.9.3/sing-box-1.9.3-linux-amd64.tar.gz
           tar -xzf sing-box-1.9.3-linux-amd64.tar.gz
           sudo cp sing-box-1.9.3-linux-amd64/sing-box /usr/local/bin/
-          python convert_proxy.py
+          if [ -f convert_proxy.py ]; then
+            python convert_proxy.py
+          else
+            echo "⚠️ convert_proxy.py 不存在，跳过转换"
+          fi
           nohup sing-box run -c config.json > singbox.log 2>&1 &
           sleep 3
-          curl -sS --socks5 127.0.0.1:8080 -o /dev/null -w "代理隧道建立成功！\n" https://api.ipify.org || echo "代理可能未就绪，继续执行"
+          curl -sS --socks5 127.0.0.1:8080 -o /dev/null -w "代理隧道建立成功！\n" https://api.ipify.org || echo "⚠️ 代理可能未就绪，继续执行"
 
-      - name: 7. 执行签到脚本
+      - name: 8. 执行签到脚本
         env:
           PROXY_STR: ${{ secrets.PROXY_STR }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -183,16 +74,16 @@ jobs:
           BROWSER_USER_DATA_DIR: /home/runner/.chrome-profile-agentrouter
         run: |
           if [ -n "$PROXY_STR" ]; then
-            echo "启用 BROWSER_PROXY 走代理节点隧道 (使用更稳定的 HTTP 协议)"
+            echo "启用 BROWSER_PROXY 走代理节点隧道"
             export BROWSER_PROXY="http://127.0.0.1:8080"
           else
             echo "未配置代理，使用原生 IP 直接访问"
           fi
           xvfb-run --auto-servernum python main.py
 
-      - name: 8. 保存更新后的 Chrome Profile
+      - name: 9. 仅在签到成功时回存 Profile
         uses: actions/cache/save@v4
-        if: always()
+        if: success()
         with:
           path: ~/.chrome-profile-agentrouter
           key: chrome-profile-agentrouter-v1-${{ github.run_id }}
