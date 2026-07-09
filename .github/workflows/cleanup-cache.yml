@@ -1,0 +1,39 @@
+name: 🧹 清理旧 Cache
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'  # 每周一凌晨 3 点
+  workflow_dispatch:
+
+jobs:
+  cleanup-caches:
+    name: 🧹 删除过期 Cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 删除 7 天前的 cache
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const caches = await github.rest.actions.getActionsCacheList({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const now = Date.now();
+            const sevenDays = 7 * 24 * 60 * 60 * 1000;
+            let deleted = 0;
+            for (const cache of caches.data.actions_caches) {
+              const age = now - new Date(cache.created_at).getTime();
+              if (age > sevenDays) {
+                await github.rest.actions.deleteActionsCacheById({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  cache_id: cache.id,
+                });
+                console.log(`已删除: ${cache.key} (创建于 ${cache.created_at})`);
+                deleted++;
+              }
+            }
+            console.log(`共删除 ${deleted} 个过期 cache`);
