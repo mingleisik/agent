@@ -5,6 +5,9 @@ on:
     - cron: '0 3 * * 1'  # 每周一凌晨 3 点
   workflow_dispatch:
 
+permissions:
+  actions: write
+
 jobs:
   cleanup-caches:
     name: 🧹 删除过期 Cache
