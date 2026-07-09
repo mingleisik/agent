@@ -1,0 +1,206 @@
+name: 🛠️ 调试 Chrome Profile（noVNC 远程）
+
+on:
+  workflow_dispatch:
+    inputs:
+      wait_minutes:
+        description: '远程操作等待时长（分钟，默认 5）'
+        required: false
+        default: '5'
+      open_url:
+        description: '启动后自动打开的页面（留空则打开 agentrouter 登录页）'
+        required: false
+        default: ''
+
+concurrency:
+  group: agentrouter-debug
+  cancel-in-progress: true
+
+jobs:
+  debug-profile:
+    name: 🛠️ 远程调试 Chrome Profile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 1. 检出代码
+        uses: actions/checkout@v4
+
+      - name: 2. 安装 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 3. 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U seleniumbase
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb x11vnc xdotool fluxbox novnc websockify
+
+      - name: 4. 恢复 Chrome Profile 缓存
+        id: restore-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.chrome-profile-agentrouter
+          key: chrome-profile-agentrouter-v1-${{ github.run_id }}
+          restore-keys: |
+            chrome-profile-agentrouter-v1-
+          fail-on-cache-miss: false
+
+      - name: 5. 检查 Profile 状态
+        run: |
+          if [ -d "$HOME/.chrome-profile-agentrouter/Default" ]; then
+            echo "✅ Chrome Profile 已恢复"
+            du -sh ~/.chrome-profile-agentrouter
+          else
+            echo "⚠️ Profile 不存在或为空，将创建新 Profile"
+            mkdir -p ~/.chrome-profile-agentrouter
+          fi
+
+      - name: 6. 按需拉起代理（Sing-Box）
+        if: env.PROXY_STR != ''
+        env:
+          PROXY_STR: ${{ secrets.PROXY_STR }}
+        run: |
+          echo "✅ 检测到代理配置，正在拉起 Sing-Box..."
+          curl -LO https://github.com/SagerNet/sing-box/releases/download/v1.9.3/sing-box-1.9.3-linux-amd64.tar.gz
+          tar -xzf sing-box-1.9.3-linux-amd64.tar.gz
+          sudo cp sing-box-1.9.3-linux-amd64/sing-box /usr/local/bin/
+          if [ -f convert_proxy.py ]; then
+            python convert_proxy.py
+          else
+            echo "⚠️ convert_proxy.py 不存在，跳过转换"
+          fi
+          nohup sing-box run -c config.json > singbox.log 2>&1 &
+          sleep 3
+          curl -sS --socks5 127.0.0.1:8080 \
+            -o /dev/null -w "代理隧道状态: %{http_code}\n" \
+            https://api.ipify.org || echo "⚠️ 代理可能未就绪，继续执行"
+
+      - name: 7. 清理 Profile 锁文件
+        run: |
+          rm -f ~/.chrome-profile-agentrouter/SingletonLock
+          rm -f ~/.chrome-profile-agentrouter/SingletonSocket
+          rm -f ~/.chrome-profile-agentrouter/SingletonCookie
+          echo "✅ 锁文件已清理"
+
+      - name: 8. 启动 noVNC + cloudflared + Chrome
+        env:
+          PROXY_STR: ${{ secrets.PROXY_STR }}
+          WAIT_MINUTES: ${{ github.event.inputs.wait_minutes }}
+          OPEN_URL: ${{ github.event.inputs.open_url }}
+        run: |
+          set -e
+
+          # 下载锁定版本的 cloudflared
+          curl -sSL https://github.com/cloudflare/cloudflared/releases/download/2024.10.1/cloudflared-linux-amd64 \
+            -o /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+
+          # 启动虚拟屏幕
+          Xvfb :99 -screen 0 1280x800x24 &
+          export DISPLAY=:99
+          sleep 1
+
+          # 启动窗口管理器
+          fluxbox &
+          sleep 1
+
+          # 启动 VNC（无密码）
+          x11vnc -display :99 -forever -nopw -rfbport 5900 -shared -o /tmp/x11vnc.log &
+          sleep 2
+
+          # 启动 noVNC
+          websockify --web /usr/share/novnc 6080 localhost:5900 &
+          sleep 2
+
+          # 启动 cloudflared 临时隧道
+          nohup cloudflared tunnel --url http://localhost:6080 > /tmp/cf.log 2>&1 &
+
+          # 带重试的隧道地址提取
+          CF_URL=""
+          for i in $(seq 1 10); do
+            CF_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -1)
+            [ -n "$CF_URL" ] && break
+            sleep 3
+          done
+
+          if [ -z "$CF_URL" ]; then
+            echo "❌ 未获取到 trycloudflare 链接，打印 /tmp/cf.log："
+            tail -200 /tmp/cf.log || true
+            exit 1
+          fi
+
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  🌐 浏览器打开下面的链接远程操控 Chrome                     ║"
+          echo "║                                                              ║"
+          echo "║  👉 ${CF_URL}/vnc.html?autoconnect=true&reconnect=true"
+          echo "║                                                              ║"
+          echo "║  打开后请手动检查：                                          ║"
+          echo "║  1. 访问 https://agentrouter.org/login                      ║"
+          echo "║  2. 点击 Continue with GitHub                                ║"
+          echo "║  3. 观察是否能正常跳转到 GitHub 并完成登录                   ║"
+          echo "║  4. 如果有验证码/CAPTCHA，请手动完成                        ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+
+          # 构造目标 URL
+          TARGET_URL="${OPEN_URL:-https://agentrouter.org/login}"
+
+          # 构造 Chrome 启动参数
+          CHROME_ARGS="--user-data-dir=$HOME/.chrome-profile-agentrouter \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-session-crashed-bubble \
+            --no-restore-last-session \
+            --disable-dev-shm-usage \
+            --no-sandbox \
+            --window-size=1280,800 \
+            --lang=zh-CN \
+            --accept-lang=zh-CN,zh"
+
+          if [ -n "$PROXY_STR" ]; then
+            CHROME_ARGS="$CHROME_ARGS --proxy-server=http://127.0.0.1:8080"
+            echo "🌐 Chrome 已配置代理"
+          fi
+
+          echo "🌐 目标页面: $TARGET_URL"
+
+          # 启动 Chrome
+          rm -f ~/.chrome-profile-agentrouter/SingletonLock ~/.chrome-profile-agentrouter/SingletonSocket ~/.chrome-profile-agentrouter/SingletonCookie || true
+          google-chrome $CHROME_ARGS --new-window "$TARGET_URL" >/tmp/chrome.log 2>&1 &
+          echo $! > /tmp/chrome.pid
+          echo "✅ 已启动 Chrome (pid=$(cat /tmp/chrome.pid))"
+
+          WAIT_SECS=$(( ${WAIT_MINUTES:-5} * 60 ))
+          echo ""
+          echo "⏳ 等待 ${WAIT_MINUTES:-5} 分钟供远程操作..."
+
+          # watchdog：Chrome 退出则重启
+          for i in $(seq 1 $((WAIT_SECS/5))); do
+            if [ -f /tmp/chrome.pid ]; then
+              PID=$(cat /tmp/chrome.pid)
+              if ! kill -0 "$PID" >/dev/null 2>&1; then
+                echo "⚠️ Chrome 已退出，重启..."
+                tail -50 /tmp/chrome.log || true
+                rm -f ~/.chrome-profile-agentrouter/SingletonLock ~/.chrome-profile-agentrouter/SingletonSocket ~/.chrome-profile-agentrouter/SingletonCookie || true
+                google-chrome $CHROME_ARGS --new-window "$TARGET_URL" >/tmp/chrome.log 2>&1 &
+                echo $! > /tmp/chrome.pid
+                echo "✅ Chrome 已重启 (pid=$(cat /tmp/chrome.pid))"
+              fi
+            fi
+            sleep 5
+          done
+
+      - name: 9. 保存 Chrome Profile 到 Cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.chrome-profile-agentrouter
+          key: chrome-profile-agentrouter-v1-${{ github.run_id }}
+
+      - name: 10. 完成
+        run: |
+          echo "✅ Chrome Profile 已保存"
+          echo "如果手动登录成功，后续签到任务将使用此 Profile"
