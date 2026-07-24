@@ -38,15 +38,15 @@ jobs:
           key: chrome-profile-agentrouter-v1-${{ github.run_id }}
           restore-keys: |
             chrome-profile-agentrouter-v1-
-          fail-on-cache-miss: true
+          fail-on-cache-miss: false
 
       - name: 6. 验证 Profile 完整性
         run: |
           if [ ! -d "$HOME/.chrome-profile-agentrouter/Default" ]; then
-            echo "❌ Profile 目录不存在或不完整，需要重新初始化"
-            exit 1
+            echo "⚠️ Profile 目录不存在，将作为全新任务启动登录流程"
+          else
+            echo "✅ Profile 目录结构完整"
           fi
-          echo "✅ Profile 目录结构完整"
 
       - name: 7. 按需下载并配置 Sing-Box 代理
         if: env.PROXY_STR != ''
@@ -71,6 +71,8 @@ jobs:
           PROXY_STR: ${{ secrets.PROXY_STR }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+          GH_PASSWORD: ${{ secrets.GH_PASSWORD }}
           BROWSER_USER_DATA_DIR: /home/runner/.chrome-profile-agentrouter
         run: |
           if [ -n "$PROXY_STR" ]; then
