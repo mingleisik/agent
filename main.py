@@ -16,7 +16,7 @@ from seleniumbase import SB
 USER_ENV_FILE = str(Path.home() / ".config" / "browser-automation-panel" / "scripts.env")
 TASK_RESULT_PATH = (os.environ.get("TASK_RESULT_PATH") or "").strip()
 TASK_SCREENSHOT_PATH = (os.environ.get("TASK_SCREENSHOT_PATH") or "").strip()
-SCRIPT_REVISION = "2026-06-24-github-actions"
+SCRIPT_REVISION = "2026-07-24-github-auto-login"
 
 SITE_URL = "https://agentrouter.org"
 LOGIN_URL = "https://agentrouter.org/login"
@@ -28,6 +28,8 @@ USE_UC = False
 TG_CHAT_ID = ""
 TG_TOKEN = ""
 TG_PROXY = ""
+GH_USERNAME = ""
+GH_PASSWORD = ""
 
 
 def log(message: str) -> None:
@@ -62,7 +64,7 @@ def load_env_file(env_file_path: str) -> bool:
 
 def refresh_config() -> None:
     global SITE_URL, LOGIN_URL, WALLET_URL, LOGIN_TEXT, WAIT_AFTER_CLICK, READY_WAIT, USE_UC
-    global TG_CHAT_ID, TG_TOKEN, TG_PROXY
+    global TG_CHAT_ID, TG_TOKEN, TG_PROXY, GH_USERNAME, GH_PASSWORD
 
     SITE_URL = (os.environ.get("AGENTROUTER_SITE_URL") or "https://agentrouter.org").strip().rstrip("/")
     LOGIN_URL = (os.environ.get("AGENTROUTER_LOGIN_URL") or f"{SITE_URL}/login").strip()
@@ -85,6 +87,8 @@ def refresh_config() -> None:
         or os.environ.get("all_proxy")
         or ""
     ).strip()
+    GH_USERNAME = (os.environ.get("GH_USERNAME") or "").strip()
+    GH_PASSWORD = (os.environ.get("GH_PASSWORD") or "").strip()
 
 
 def host_from_url(url: str) -> str:
@@ -172,6 +176,48 @@ def send_tg_message(text: str) -> None:
         log("TG text push sent")
     except Exception as exc:
         log(f"TG text push failed: {exc}")
+
+
+def get_tg_updates_via_curl(offset=None) -> dict:
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates?timeout=5"
+    if offset:
+        url += f"&offset={offset}"
+    cmd = ["curl", "-sS", "--max-time", "15"]
+    proxy = normalize_socks_proxy(TG_PROXY)
+    if proxy and TG_PROXY.startswith("socks"):
+        cmd += ["--socks5-hostname", proxy]
+    elif proxy:
+        cmd += ["-x", proxy]
+    cmd.append(url)
+    try:
+        proc = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=20)
+        return json.loads(proc.stdout)
+    except Exception:
+        return {}
+
+
+def tg_wait_code(timeout: int = 90) -> str:
+    if not TG_TOKEN or not TG_CHAT_ID:
+        log("TG not configured for 2FA code retrieval")
+        return ""
+    log(f"等待 TG 两步验证码（{timeout}s）...")
+    offset = None
+    data = get_tg_updates_via_curl()
+    if data.get("ok") and data.get("result"):
+        offset = data["result"][-1]["update_id"] + 1
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        data = get_tg_updates_via_curl(offset)
+        if data.get("ok") and data.get("result"):
+            for upd in data["result"]:
+                offset = upd["update_id"] + 1
+                msg = upd.get("message", {})
+                if str(msg.get("chat", {}).get("id")) == str(TG_CHAT_ID):
+                    m = re.search(r"\b(\d{6})\b", (msg.get("text") or "").strip())
+                    if m:
+                        return m.group(1)
+        time.sleep(2)
+    return ""
 
 
 def build_tg_card(ok: bool, data: dict | None = None, error: str = "") -> str:
@@ -277,7 +323,7 @@ def patch_json_path(obj: dict, dotted_key: str, value) -> None:
     cur[parts[-1]] = value
 
 
-def patch_json_file(path: Path, updates: dict[str, object]) -> bool:
+def patch_json_file(path: Path, updates: dict) -> bool:
     if not path.exists():
         return False
     try:
@@ -421,16 +467,10 @@ def locate_github_login_control(sb: SB) -> dict:
         const target = pick.el;
         target.scrollIntoView({ block: 'center', inline: 'center' });
         const r = target.getBoundingClientRect();
-        const borderX = Math.max(0, ((window.outerWidth || 0) - (window.innerWidth || 0)) / 2);
-        const topChrome = Math.max(0, (window.outerHeight || 0) - (window.innerHeight || 0) - borderX);
         return {
           found: true,
           text: textOf(target),
-          href: hrefOf(target),
-          viewportX: r.left + r.width / 2,
-          viewportY: r.top + r.height / 2,
-          screenX: Math.round((window.screenX || 0) + borderX + r.left + r.width / 2),
-          screenY: Math.round((window.screenY || 0) + topChrome + r.top + r.height / 2)
+          href: hrefOf(target)
         };
         """,
         LOGIN_TEXT,
@@ -454,29 +494,66 @@ def webdriver_click_github_login(sb: SB) -> None:
     element.click()
 
 
+def _left_login_page(sb: SB, timeout: float = 8.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if "github.com" in current_url_safe(sb):
+            return True
+        try:
+            for h in sb.driver.window_handles:
+                sb.driver.switch_to.window(h)
+                if "github.com" in current_url_safe(sb):
+                    return True
+        except Exception:
+            pass
+        if is_target_host(current_url_safe(sb)) and path_from_url(current_url_safe(sb)) != "/login":
+            return True
+        time.sleep(0.4)
+    return False
+
+
 def click_github_login(sb: SB) -> None:
     deadline = time.time() + 20
-    last_result = None
+    last = None
     while time.time() < deadline:
-        last_result = locate_github_login_control(sb)
-        if last_result.get("found"):
+        last = locate_github_login_control(sb)
+        if last.get("found"):
             break
         time.sleep(0.5)
-    if not (isinstance(last_result, dict) and last_result.get("found")):
-        raise RuntimeError(f"GitHub login control not found: {last_result}")
+    if not (isinstance(last, dict) and last.get("found")):
+        raise RuntimeError(f"GitHub login control not found: {last}")
+    log(f"GitHub login control: text={last.get('text')} href={last.get('href')}")
 
-    log(f"GitHub login control: text={last_result.get('text')} href={last_result.get('href')}")
+    # 优先 WebDriver 原生点击（Xvfb 下最稳，不吃屏幕坐标）
     try:
-        x = str(int(last_result["screenX"]))
-        y = str(int(last_result["screenY"]))
-        log(f"xdotool click GitHub login: x={x} y={y}")
-        subprocess.run(["xdotool", "mousemove", x, y], check=True, timeout=5)
-        time.sleep(0.15)
-        subprocess.run(["xdotool", "click", "1"], check=True, timeout=5)
-        return
+        webdriver_click_github_login(sb)
+        if _left_login_page(sb):
+            log("login click via WebDriver ok")
+            return
+        log("WebDriver click didn't navigate, trying JS click")
     except Exception as exc:
-        log(f"xdotool GitHub click failed, fallback to WebDriver click: {exc}")
-    webdriver_click_github_login(sb)
+        log(f"WebDriver click failed: {exc}")
+
+    # 兜底：JS click
+    try:
+        sb.driver.execute_script(
+            r"""
+            const t = arguments[0];
+            const vis = (el)=>!!(el.offsetWidth||el.offsetHeight||el.getClientRects().length);
+            const txt = (el)=>(el.innerText||el.textContent||'').replace(/\s+/g,' ').trim();
+            const el = Array.from(document.querySelectorAll('button,a,[role="button"]'))
+              .find(e=>vis(e)&&(txt(e)===t||/github/i.test(txt(e))));
+            if (el) el.click();
+            """,
+            LOGIN_TEXT,
+        )
+        if _left_login_page(sb):
+            log("login click via JS ok")
+            return
+    except Exception as exc:
+        log(f"JS click failed: {exc}")
+
+    raise RuntimeError(f"clicked GitHub login but stayed on /login; current={current_url_safe(sb)}")
 
 
 def page_text_sample(sb: SB, limit: int = 5000) -> str:
@@ -577,10 +654,137 @@ def switch_to_best_target_tab(sb: SB) -> None:
             pass
 
 
+def find_github_tab(sb: SB) -> str | None:
+    try:
+        handles = list(sb.driver.window_handles)
+    except Exception:
+        return None
+    for h in handles:
+        try:
+            sb.driver.switch_to.window(h)
+            if "github.com" in current_url_safe(sb):
+                return h
+        except Exception:
+            continue
+    return None
+
+
+def handle_github_login(sb: SB) -> None:
+    url = current_url_safe(sb)
+    if "github.com" not in url:
+        return
+
+    # 1. 账号密码
+    if sb.is_element_visible('input[name="login"]'):
+        if not GH_USERNAME or not GH_PASSWORD:
+            log("WARNING: 缺少 GH_USERNAME / GH_PASSWORD，无法自动登录 GitHub")
+            return
+        log("填入 GitHub 账号密码...")
+        sb.type('input[name="login"]', GH_USERNAME)
+        time.sleep(0.5)
+        sb.type('input[name="password"]', GH_PASSWORD)
+        time.sleep(0.5)
+        sb.click('input[type="submit"], button[type="submit"]')
+        time.sleep(3)
+
+    # 2. 设备验证
+    url = current_url_safe(sb)
+    if "verified-device" in url or "device-verification" in url:
+        log("需要设备验证，等待批准（60s）...")
+        send_tg_message("⚠️ GitHub 需要设备验证，请去邮箱/App 点击批准！等待 60 秒...")
+        for i in range(60):
+            time.sleep(1)
+            u = current_url_safe(sb)
+            if "verified-device" not in u and "device-verification" not in u:
+                log("设备验证通过")
+                send_tg_message("✅ 设备验证通过")
+                break
+            if i and i % 10 == 0:
+                try:
+                    sb.refresh_page()
+                except Exception:
+                    pass
+
+    # 3. 两步验证
+    url = current_url_safe(sb)
+    if "two-factor" in url:
+        for sel in ['a:contains("Use an authentication app")',
+                    'button:contains("Authenticator app")',
+                    'button:contains("Use authenticator")']:
+            try:
+                if sb.is_element_visible(sel):
+                    sb.click(sel)
+                    time.sleep(2)
+            except Exception:
+                pass
+        url = current_url_safe(sb)
+        if "two-factor/mobile" in url:
+            send_tg_message("⚠️ GitHub Mobile 两步验证：请打开手机 App 批准本次登录，等待中...")
+            for _ in range(45):
+                time.sleep(2)
+                if "two-factor" not in current_url_safe(sb):
+                    break
+        else:
+            send_tg_message(f"🔐 需要 GitHub 两步验证码，用户 {GH_USERNAME} 正在登录，请直接回复 6 位数字：")
+            code = tg_wait_code(timeout=90)
+            if code:
+                log("收到验证码，正在填入...")
+                for sel in ['input[autocomplete="one-time-code"]', 'input[name="app_otp"]',
+                            'input#app_totp', 'input#otp', 'input[inputmode="numeric"]']:
+                    if sb.is_element_visible(sel):
+                        sb.type(sel, code)
+                        break
+                time.sleep(1)
+                try:
+                    if sb.is_element_visible('button:contains("Verify")'):
+                        sb.click('button:contains("Verify")')
+                    else:
+                        sb.execute_script(
+                            "document.activeElement.form && document.activeElement.form.submit();"
+                        )
+                except Exception:
+                    pass
+                for _ in range(15):  # 等它真正离开 2FA，避免重复要码
+                    time.sleep(1)
+                    if "two-factor" not in current_url_safe(sb):
+                        break
+            else:
+                log("未收到 TG 验证码")
+
+    # 4. OAuth 授权页
+    url = current_url_safe(sb)
+    if "login/oauth/authorize" in url:
+        log("OAuth 授权页，点击 Authorize...")
+        for sel in ['button[name="authorize"]', 'button:contains("Authorize")']:
+            try:
+                if sb.is_element_visible(sel):
+                    sb.click(sel)
+                    time.sleep(3)
+                    break
+            except Exception:
+                pass
+
+
 def wait_for_login_success(sb: SB) -> None:
     deadline = time.time() + WAIT_AFTER_CLICK
     last_url = ""
     while time.time() < deadline:
+        # 发现 github 标签：切过去自动处理登录/2FA/授权
+        gh = find_github_tab(sb)
+        if gh:
+            sb.driver.switch_to.window(gh)
+            url = current_url_safe(sb)
+            if url != last_url:
+                log(f"github 流程: {url}")
+                last_url = url
+            try:
+                handle_github_login(sb)
+            except Exception as exc:
+                log(f"handle_github_login 异常: {exc}")
+            time.sleep(1)
+            continue
+
+        # 没有 github 标签，回到目标站点看是否已进 console
         switch_to_best_target_tab(sb)
         url = current_url_safe(sb)
         if url != last_url:
@@ -637,13 +841,14 @@ def main() -> None:
     screenshot_path = None
 
     try:
-        log("AgentRouter API-first check-in task started")
+        log("AgentRouter check-in task started")
         log(f"SCRIPT_REVISION: {SCRIPT_REVISION}")
         log(f"SITE_URL: {SITE_URL}")
         log(f"LOGIN_URL: {LOGIN_URL}")
         log(f"AGENTROUTER_USE_UC: {int(USE_UC)}")
         log(f"BROWSER_USER_DATA_DIR: {profile_dir}")
         log(f"BROWSER_CHROME_PATH: {(os.environ.get('BROWSER_CHROME_PATH') or '').strip()}")
+        log(f"GH_USERNAME set: {bool(GH_USERNAME)} / GH_PASSWORD set: {bool(GH_PASSWORD)}")
         normalize_profile_crash_state(profile_dir)
         cleanup_profile_locks(profile_dir)
 
@@ -670,6 +875,7 @@ def main() -> None:
 
             click_github_login(sb)
             wait_for_login_success(sb)
+
             after_balance = open_wallet_and_read_balance(sb)
             data["balanceAfterText"] = after_balance.get("balanceText") or ""
             data["balanceAfterAmount"] = after_balance.get("balanceAmount") or ""
